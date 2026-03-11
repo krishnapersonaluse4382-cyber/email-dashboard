@@ -5,6 +5,8 @@ import { supabase, EmailLog } from '@/lib/supabase';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
+// @ts-ignore
+import autoTable from 'jspdf-autotable';
 
 const INITIAL_PLATFORMS = [
     { name: 'YouTube', icon: '🌐', key: 'YouTube' },
@@ -55,6 +57,14 @@ export default function Dashboard() {
     const [showExportMenu, setShowExportMenu] = useState(false);
     const [platforms, setPlatforms] = useState(INITIAL_PLATFORMS);
     const [industries, setIndustries] = useState(INITIAL_INDUSTRIES);
+    const [deleteTarget, setDeleteTarget] = useState<{ type: 'platform' | 'industry' | 'campaign', key: string } | null>(null);
+    const [deleteStep, setDeleteStep] = useState<1 | 2 | 0>(0);
+    const [hiddenCampaigns, setHiddenCampaigns] = useState<string[]>([]);
+
+    // Rename state
+    const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
+    const [editCampaignName, setEditCampaignName] = useState<string>('');
+    const [explorerView, setExplorerView] = useState<'grid' | 'list'>('grid');
 
     async function load() {
         setLoading(true);
@@ -86,6 +96,9 @@ export default function Dashboard() {
         const savedIndustries = localStorage.getItem('email_os_industries');
         if (savedIndustries) setIndustries(JSON.parse(savedIndustries));
 
+        const savedHidden = localStorage.getItem('email_os_hidden_camps');
+        if (savedHidden) setHiddenCampaigns(JSON.parse(savedHidden));
+
         const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowExplorer(false); };
         window.addEventListener('keydown', handleEsc);
         return () => window.removeEventListener('keydown', handleEsc);
@@ -98,12 +111,7 @@ export default function Dashboard() {
         return { opens, clicks, replies };
     };
 
-    const applyFilters = (row: EmailLog) => {
-        const { opens, clicks, replies } = getInteractions(row);
-        if (view === 'opened' && opens === 0) return false;
-        if (view === 'clicked' && clicks === 0) return false;
-        if (view === 'replies' && replies === 0) return false;
-        
+    const applyBaseFilters = (row: EmailLog) => {
         if (filter.campaign && row.campaign_id !== filter.campaign) return false;
         if (filter.agent && agentOf(row).key !== filter.agent) return false;
         if (filter.platform && !(row.campaign_id || '').toLowerCase().includes(filter.platform.toLowerCase())) return false;
@@ -116,12 +124,28 @@ export default function Dashboard() {
         return true;
     };
 
-    const visibleLogs = logs.filter(applyFilters);
-    const totalSent = logs.filter(l => l.status === 'SENT').length;
+    const applyViewFilters = (row: EmailLog) => {
+        const { opens, clicks, replies } = getInteractions(row);
+        if (view === 'opened' && opens === 0) return false;
+        if (view === 'clicked' && clicks === 0) return false;
+        if (view === 'replies' && replies === 0) return false;
+        return true;
+    };
+
+    const baseLogs = logs.filter(applyBaseFilters);
+    const visibleLogs = baseLogs.filter(applyViewFilters);
+    const totalSent = baseLogs.filter(l => l.status === 'SENT').length;
+
+    const baseLogIds = new Set(baseLogs.map(l => l.id));
+    const baseLogEmails = new Set(baseLogs.map(l => l.email));
+
+    const visibleOpens = interactions.opens.filter(o => baseLogIds.has(o.email_id) || baseLogEmails.has(o.recipient) || baseLogEmails.has(o.email));
+    const visibleClicks = interactions.clicks.filter(c => baseLogIds.has(c.email_id) || baseLogEmails.has(c.recipient) || baseLogEmails.has(c.email));
+    const visibleReplies = interactions.replies.filter(r => baseLogIds.has(r.email_id) || baseLogEmails.has(r.recipient) || baseLogEmails.has(r.email) || baseLogEmails.has(r.from_email));
     
-    const uniqueOpened = new Set(interactions.opens.map(o => o.email_id || o.recipient || o.email)).size;
-    const uniqueClicked = new Set(interactions.clicks.map(c => c.email_id || c.recipient || c.email)).size;
-    const uniqueReplied = new Set(interactions.replies.map(r => r.email_id || r.recipient || r.email || r.from_email)).size;
+    const uniqueOpened = new Set(visibleOpens.map(o => o.email_id || o.recipient || o.email)).size;
+    const uniqueClicked = new Set(visibleClicks.map(c => c.email_id || c.recipient || c.email)).size;
+    const uniqueReplied = new Set(visibleReplies.map(r => r.email_id || r.recipient || r.email || r.from_email)).size;
 
     const openRate = totalSent > 0 ? ((uniqueOpened / totalSent) * 100).toFixed(1) : '0.0';
     const clickRate = totalSent > 0 ? ((uniqueClicked / totalSent) * 100).toFixed(1) : '0.0';
@@ -132,7 +156,9 @@ export default function Dashboard() {
         const c = l.campaign_id || 'GENERAL'; 
         (campaignMap[c] = campaignMap[c] || []).push(l); 
     });
-    const campaignsList = Object.entries(campaignMap).sort((a, b) => b[1].length - a[1].length);
+    const campaignsList = Object.entries(campaignMap)
+        .filter(([cid]) => !hiddenCampaigns.includes(cid))
+        .sort((a, b) => b[1].length - a[1].length);
 
     const groupedByMonth: Record<string, [string, EmailLog[]][]> = {};
     const monthsToShow = ["March 2026", "April 2026", "May 2026"];
@@ -169,7 +195,7 @@ export default function Dashboard() {
         } else if (format === 'pdf') {
             const doc = new jsPDF() as any;
             doc.text("Email OS - Engagement Report", 14, 15);
-            doc.autoTable({
+            autoTable(doc, {
                 startY: 20,
                 head: [['Recipient', 'Campaign', 'Agent', 'Strategy', 'Status', 'Opens', 'Replies']],
                 body: exportData.map(d => [d.Recipient, d.Campaign, d.Agent, d.Strategy, d.Status, d.Opens, d.Replies]),
@@ -220,7 +246,62 @@ export default function Dashboard() {
         }
     };
 
+    const confirmDelete = () => {
+        if (!deleteTarget) return;
+        if (deleteStep === 1) {
+            setDeleteStep(2);
+            return;
+        }
+        if (deleteStep === 2) {
+            if (deleteTarget.type === 'platform') {
+                const newList = platforms.filter(p => p.key !== deleteTarget.key);
+                setPlatforms(newList);
+                localStorage.setItem('email_os_platforms', JSON.stringify(newList));
+                if (filter.platform === deleteTarget.key) setFilter({});
+            } else if (deleteTarget.type === 'industry') {
+                const newList = industries.filter(i => i.key !== deleteTarget.key);
+                setIndustries(newList);
+                localStorage.setItem('email_os_industries', JSON.stringify(newList));
+                if (filter.industry === deleteTarget.key) setFilter({});
+            } else if (deleteTarget.type === 'campaign') {
+                const newList = [...hiddenCampaigns, deleteTarget.key];
+                setHiddenCampaigns(newList);
+                localStorage.setItem('email_os_hidden_camps', JSON.stringify(newList));
+                if (filter.campaign === deleteTarget.key) setFilter({});
+            }
+            setDeleteTarget(null);
+            setDeleteStep(0);
+        }
+    };
+
+    const startDelete = (type: 'platform' | 'industry' | 'campaign', key: string) => {
+        setDeleteTarget({ type, key });
+        setDeleteStep(1);
+    };
+
     const resetFilters = () => { setView('all'); setFilter({}); setSearch(''); };
+
+    const handleRenameCampaign = async (oldName: string, newName: string) => {
+        if (!newName || !newName.trim() || newName === oldName) {
+            setEditingCampaignId(null);
+            return;
+        }
+
+        try {
+            // Update Supabase Database!
+            await supabase.from('email_logs').update({ campaign_id: newName.trim() }).eq('campaign_id', oldName);
+            
+            // Update local logs visually to avoid refresh delay
+            setLogs(logs.map(log => log.campaign_id === oldName ? { ...log, campaign_id: newName.trim() } : log));
+            
+            // Update filters if currently selected
+            if (filter.campaign === oldName) setFilter({ ...filter, campaign: newName.trim() });
+            
+            setEditingCampaignId(null);
+        } catch (err) {
+            console.error('Rename failed', err);
+        }
+    };
 
     if (loading) return <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#030407', color: '#7C3AED', fontSize: '1.2rem', fontWeight: 800 }}>Initializing Command Center...</div>;
 
@@ -229,9 +310,11 @@ export default function Dashboard() {
             <style jsx global>{`
                 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
                 * { font-family: 'Plus Jakarta Sans', sans-serif; box-sizing: border-box; }
-                ::-webkit-scrollbar { width: 4px; }
-                ::-webkit-scrollbar-track { background: transparent; }
-                ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 10px; }
+                ::-webkit-scrollbar { width: 10px; height: 10px; }
+                ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.05); }
+                ::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.7); border-radius: 10px; border: 2px solid #08090D; }
+                ::-webkit-scrollbar-thumb:hover { background: rgba(124, 58, 237, 1); }
+                .custom-scroll { scrollbar-width: auto; scrollbar-color: #7C3AED rgba(255, 255, 255, 0.05); }
             `}</style>
 
             <aside style={{ width: 280, background: '#08090D', borderRight: '1px solid rgba(255, 255, 255, 0.1)', padding: '24px', display: 'flex', flexDirection: 'column' }}>
@@ -243,9 +326,9 @@ export default function Dashboard() {
                     </div>
                 </div>
 
-                <div style={{ flex: 1, overflowY: 'auto' }}>
+                <div className="custom-scroll" style={{ flex: 1, overflowY: 'auto', paddingRight: 4 }}>
                     <div style={{ fontSize: '0.65rem', color: '#94A3B8', textTransform: 'uppercase', letterSpacing: 1.5, margin: '24px 0 12px 10px', fontWeight: 700 }}>General</div>
-                    <NavAction label="All Activity" active={view === 'all'} onClick={() => setView('all')} badge={logs.length} />
+                    <NavAction label="All Activity" active={view === 'all'} onClick={() => setView('all')} badge={baseLogs.length} />
                     <NavAction label="Opened" active={view === 'opened'} onClick={() => setView('opened')} badge={uniqueOpened} />
                     <NavAction label="Clicked" active={view === 'clicked'} onClick={() => setView('clicked')} badge={uniqueClicked} />
                     <NavAction label="Replies" active={view === 'replies'} onClick={() => setView('replies')} badge={uniqueReplied} color="#10B981" />
@@ -254,24 +337,55 @@ export default function Dashboard() {
                         <span style={{ fontSize: '0.65rem', color: '#94A3B8', textTransform: 'uppercase', letterSpacing: 1.5, fontWeight: 700 }}>Campaigns</span>
                         <span onClick={() => setShowExplorer(true)} style={{ fontSize: '0.6rem', color: '#7C3AED', cursor: 'pointer', fontWeight: 800 }}>EXPLORER ➔</span>
                     </div>
-                    {campaignsList.slice(0, 5).map(([cid, rows]) => (
-                        <NavAction key={cid} label={`📂 ${cid.replace(/_/g, ' ').substring(0, 20)}...`} active={filter.campaign === cid} onClick={() => setFilter({ campaign: cid })} badge={rows.length} />
-                    ))}
+                    {campaignsList.map(([cid, rows]) => {
+                        const isEditing = editingCampaignId === cid;
+                        return (
+                            <div key={cid} style={{ position: 'relative' }}>
+                                {isEditing ? (
+                                    <div style={{ padding: '8px 14px', marginBottom: 2, background: 'rgba(124, 58, 237, 0.1)', borderRadius: 12 }}>
+                                        <input 
+                                            autoFocus
+                                            value={editCampaignName}
+                                            onChange={e => setEditCampaignName(e.target.value)}
+                                            onKeyDown={e => {
+                                                if (e.key === 'Enter') handleRenameCampaign(cid, editCampaignName);
+                                                if (e.key === 'Escape') setEditingCampaignId(null);
+                                            }}
+                                            onBlur={() => handleRenameCampaign(cid, editCampaignName)}
+                                            style={{ background: 'transparent', border: 'none', color: '#fff', fontSize: '0.75rem', outline: 'none', width: '100%' }}
+                                        />
+                                    </div>
+                                ) : (
+                                    <NavAction 
+                                        label={`📂 ${cid.replace(/_/g, ' ')}`} 
+                                        active={filter.campaign === cid} 
+                                        onClick={() => setFilter({ campaign: cid })} 
+                                        badge={rows.length} 
+                                        onEdit={() => {
+                                            setEditingCampaignId(cid);
+                                            setEditCampaignName(cid);
+                                        }}
+                                        onDelete={() => startDelete('campaign', cid)} 
+                                    />
+                                )}
+                            </div>
+                        );
+                    })}
 
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '32px 0 12px 10px' }}>
                         <span style={{ fontSize: '0.65rem', color: '#94A3B8', textTransform: 'uppercase', letterSpacing: 1.5, fontWeight: 700 }}>Platforms</span>
-                        <span onClick={addPlatform} style={{ fontSize: '0.8rem', color: '#7C3AED', cursor: 'pointer', fontWeight: 700 }}>+</span>
+                        <span onClick={addPlatform} style={{ fontSize: '1.2rem', color: '#7C3AED', cursor: 'pointer', fontWeight: 800 }}>+</span>
                     </div>
                     {platforms.map(p => (
-                        <NavAction key={p.key} label={`${p.icon} ${p.name}`} active={filter.platform === p.key} onClick={() => setFilter({ platform: p.key })} badge={logs.filter(l => (l.campaign_id || '').toLowerCase().includes(p.key.toLowerCase())).length} />
+                        <NavAction key={p.key} label={`${p.icon} ${p.name}`} active={filter.platform === p.key} onClick={() => setFilter({ platform: p.key })} badge={logs.filter(l => (l.campaign_id || '').toLowerCase().includes(p.key.toLowerCase())).length} onDelete={() => startDelete('platform', p.key)} />
                     ))}
 
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '32px 0 12px 10px' }}>
                         <span style={{ fontSize: '0.65rem', color: '#94A3B8', textTransform: 'uppercase', letterSpacing: 1.5, fontWeight: 700 }}>Industries</span>
-                        <span onClick={addIndustry} style={{ fontSize: '0.8rem', color: '#7C3AED', cursor: 'pointer', fontWeight: 700 }}>+</span>
+                        <span onClick={addIndustry} style={{ fontSize: '1.2rem', color: '#7C3AED', cursor: 'pointer', fontWeight: 800 }}>+</span>
                     </div>
                     {industries.map(i => (
-                        <NavAction key={i.key} label={`${i.icon} ${i.name}`} active={filter.industry === i.key} onClick={() => setFilter({ industry: i.key })} badge={logs.filter(l => (l.campaign_id || '').toLowerCase().includes(i.key.toLowerCase())).length} />
+                        <NavAction key={i.key} label={`${i.icon} ${i.name}`} active={filter.industry === i.key} onClick={() => setFilter({ industry: i.key })} badge={logs.filter(l => (l.campaign_id || '').toLowerCase().includes(i.key.toLowerCase())).length} onDelete={() => startDelete('industry', i.key)} />
                     ))}
                 </div>
 
@@ -307,7 +421,7 @@ export default function Dashboard() {
                     <SummaryCard label="Reach" value={openRate + '%'} sub={`${uniqueOpened} Opens`} color="#8B5CF6" />
                     <SummaryCard label="Engagement" value={clickRate + '%'} sub={`${uniqueClicked} Clicks`} color="#3B82F6" />
                     <SummaryCard label="Success" value={replyRate + '%'} sub={`${uniqueReplied} Replies`} color="#10B981" />
-                    <SummaryCard label="Interactions" value={interactions.opens.length + interactions.clicks.length} sub="Total events" />
+                    <SummaryCard label="Interactions" value={visibleOpens.length + visibleClicks.length + visibleReplies.length} sub="Total events" />
                     <SummaryCard label="Active Nodes" value={4} sub="Cluster healthy" color="#10B981" />
                 </section>
 
@@ -373,37 +487,96 @@ export default function Dashboard() {
                     <div onClick={e => e.stopPropagation()} style={{ maxWidth: 1200, margin: '0 auto' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 40 }}>
                             <h2 style={{ fontSize: '2.5rem', fontWeight: 800, margin: 0 }}>Campaign Explorer</h2>
-                            <button onClick={() => setShowExplorer(false)} style={{ background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', padding: '10px 20px', borderRadius: 12, cursor: 'pointer' }}>Close (Esc)</button>
+                            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                                <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', padding: 4, borderRadius: 10, border: '1px solid rgba(255,255,255,0.1)' }}>
+                                    <button onClick={() => setExplorerView('grid')} style={{ padding: '6px 12px', borderRadius: 8, background: explorerView === 'grid' ? '#7C3AED' : 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 700 }}>Grid</button>
+                                    <button onClick={() => setExplorerView('list')} style={{ padding: '6px 12px', borderRadius: 8, background: explorerView === 'list' ? '#7C3AED' : 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 700 }}>List</button>
+                                </div>
+                                <button onClick={() => setShowExplorer(false)} style={{ background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', padding: '10px 20px', borderRadius: 12, cursor: 'pointer' }}>Close (Esc)</button>
+                            </div>
                         </div>
                         
-                        {Object.entries(groupedByMonth).sort((a,b) => b[0].localeCompare(a[0])).map(([month, camps]) => (
-                            <div key={month} style={{ marginBottom: 60 }}>
-                                <div style={{ fontSize: '1.2rem', fontWeight: 800, color: '#7C3AED', textTransform: 'uppercase', letterSpacing: 2, borderBottom: '2px solid rgba(124, 58, 237, 0.2)', paddingBottom: 15, marginBottom: 25 }}>{month}</div>
-                                {camps.length === 0 ? (
-                                    <div style={{ padding: 40, background: 'rgba(255,255,255,0.02)', borderRadius: 20, textAlign: 'center', color: '#475569', fontSize: '0.9rem' }}>No campaigns launched for this period yet.</div>
-                                ) : (
-                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 20 }}>
-                                        {camps.map(([cid, rows]) => {
-                                            const sCount = rows.filter(r => r.status === 'SENT').length;
-                                            const cOpens = new Set(interactions.opens.filter(o => rows.some(r => r.id === o.email_id || r.email === (o.recipient || o.email))).map(o => o.email_id || o.recipient || o.email)).size;
-                                            const cReplies = new Set(interactions.replies.filter(r => rows.some(row => row.id === r.email_id || row.email === (r.recipient || r.email))).map(r => r.email_id || r.recipient || r.email)).size;
-                                            return (
-                                                <div key={cid} onClick={() => { setFilter({ campaign: cid }); setShowExplorer(false); }} style={{ background: '#12141D', border: '1px solid rgba(255,255,255,0.1)', padding: 24, borderRadius: 20, cursor: 'pointer', transition: 'transform 0.2s', position: 'relative', overflow: 'hidden' }} onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-5px)'} onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}>
-                                                    <div style={{ fontWeight: 800, fontSize: '1rem', marginBottom: 20, color: '#F8FAFC' }}>{cid.replace(/_/g, ' ')}</div>
-                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15 }}>
-                                                        <ExplorerMetric label="Delivered" val={sCount} />
-                                                        <ExplorerMetric label="Open Rate" val={((cOpens/sCount || 0)*100).toFixed(1) + '%'} color="#8B5CF6" />
-                                                        <ExplorerMetric label="Replies" val={cReplies} color="#10B981" />
-                                                        <ExplorerMetric label="List size" val={rows.length} />
-                                                    </div>
-                                                    <div style={{ position: 'absolute', bottom: 0, left: 0, height: 3, background: '#7C3AED', width: `${(cOpens/sCount || 0)*100}%` }}></div>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                            </div>
-                        ))}
+                        {Object.entries(groupedByMonth).sort((a,b) => b[0].localeCompare(a[0])).map(([month, camps]) => {
+                            const activeCamps = camps.filter(([c]) => !hiddenCampaigns.includes(c));
+                            return (
+                                <div key={month} style={{ marginBottom: 60 }}>
+                                    <div style={{ fontSize: '1.2rem', fontWeight: 800, color: '#7C3AED', textTransform: 'uppercase', letterSpacing: 2, borderBottom: '2px solid rgba(124, 58, 237, 0.2)', paddingBottom: 15, marginBottom: 25 }}>{month}</div>
+                                    
+                                    {activeCamps.length === 0 ? (
+                                        <div style={{ padding: 40, background: 'rgba(255,255,255,0.02)', borderRadius: 20, textAlign: 'center', color: '#475569', fontSize: '0.9rem' }}>No campaigns launched for this period yet.</div>
+                                    ) : (
+                                        explorerView === 'grid' ? (
+                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 20 }}>
+                                                {activeCamps.map(([cid, rows]) => {
+                                                    const sCount = rows.filter(r => r.status === 'SENT').length;
+                                                    const cOpens = new Set(interactions.opens.filter(o => rows.some(r => r.id === o.email_id || r.email === (o.recipient || r.email))).map(o => o.email_id || o.recipient || o.email)).size;
+                                                    const cReplies = new Set(interactions.replies.filter(r => rows.some(row => row.id === r.email_id || row.email === (r.recipient || r.email))).map(r => r.email_id || r.recipient || r.email)).size;
+                                                    return (
+                                                        <div key={cid} onClick={() => { setFilter({ campaign: cid }); setShowExplorer(false); }} style={{ background: '#12141D', border: '1px solid rgba(255,255,255,0.1)', padding: 24, borderRadius: 20, cursor: 'pointer', transition: 'transform 0.2s', position: 'relative', overflow: 'hidden' }} onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-5px)'} onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}>
+                                                            <div style={{ fontWeight: 800, fontSize: '1rem', marginBottom: 20, color: '#F8FAFC' }}>{cid.replace(/_/g, ' ')}</div>
+                                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15 }}>
+                                                                <ExplorerMetric label="Delivered" val={sCount} />
+                                                                <ExplorerMetric label="Open Rate" val={((cOpens/sCount || 0)*100).toFixed(1) + '%'} color="#8B5CF6" />
+                                                                <ExplorerMetric label="Replies" val={cReplies} color="#10B981" />
+                                                                <ExplorerMetric label="List size" val={rows.length} />
+                                                            </div>
+                                                            <div style={{ position: 'absolute', bottom: 0, left: 0, height: 3, background: '#7C3AED', width: `${(cOpens/sCount || 0)*100}%` }}></div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                                {activeCamps.map(([cid, rows]) => {
+                                                    const sCount = rows.filter(r => r.status === 'SENT').length;
+                                                    const cOpens = new Set(interactions.opens.filter(o => rows.some(r => r.id === o.email_id || r.email === (o.recipient || o.email))).map(o => o.email_id || o.recipient || o.email)).size;
+                                                    const cReplies = new Set(interactions.replies.filter(r => rows.some(row => row.id === r.email_id || row.email === (r.recipient || r.email))).map(r => r.email_id || r.recipient || r.email)).size;
+                                                    const oRate = (cOpens/sCount || 0)*100;
+                                                    return (
+                                                        <div key={cid} onClick={() => { setFilter({ campaign: cid }); setShowExplorer(false); }} style={{ background: '#12141D', border: '1px solid rgba(255,255,255,0.05)', padding: '16px 24px', borderRadius: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderLeft: `4px solid ${oRate > 0 ? '#7C3AED' : '#334155'}` }}>
+                                                            <div style={{ flex: 1 }}>
+                                                                <div style={{ fontWeight: 700, fontSize: '1rem', color: '#F8FAFC' }}>{cid.replace(/_/g, ' ')}</div>
+                                                                <div style={{ display: 'flex', gap: 20, marginTop: 4 }}>
+                                                                    <span style={{ fontSize: '0.7rem', color: '#64748B' }}>DELIVERED: <b style={{color:'#fff'}}>{sCount}</b></span>
+                                                                    <span style={{ fontSize: '0.7rem', color: '#64748B' }}>LIST: <b style={{color:'#fff'}}>{rows.length}</b></span>
+                                                                </div>
+                                                            </div>
+                                                            <div style={{ display: 'flex', gap: 40, alignItems: 'center' }}>
+                                                                <div style={{ textAlign: 'right' }}>
+                                                                    <div style={{ fontSize: '1rem', fontWeight: 800, color: '#8B5CF6' }}>{oRate.toFixed(1)}%</div>
+                                                                    <div style={{ fontSize: '0.6rem', color: '#64748B', textTransform: 'uppercase' }}>Open Rate</div>
+                                                                </div>
+                                                                <div style={{ textAlign: 'right' }}>
+                                                                    <div style={{ fontSize: '1rem', fontWeight: 800, color: '#10B981' }}>{cReplies}</div>
+                                                                    <div style={{ fontSize: '0.6rem', color: '#64748B', textTransform: 'uppercase' }}>Replies</div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {deleteTarget && deleteStep > 0 && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(5px)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <div style={{ background: '#12141D', padding: 32, borderRadius: 16, width: 400, border: '1px solid rgba(255,255,255,0.1)', textAlign: 'center' }}>
+                        <h3 style={{marginTop: 0, fontSize: '1.4rem', color: deleteStep === 2 ? '#EF4444' : '#fff'}}>{deleteStep === 1 ? 'Warning ⚠️' : '🚨 Final Warning 🚨'}</h3>
+                        <p style={{ color: '#94A3B8', fontSize: '0.95rem', marginBottom: 24, lineHeight: 1.5 }}>
+                            {deleteStep === 1 
+                                ? `Are you sure you wanna perform this action? This will cause you to lose all the data inside that ${deleteTarget.type}.` 
+                                : `This is the last time you can ever see this panel. Make sure there is nothing important inside it. Do you really wanna delete it?`}
+                        </p>
+                        <div style={{ display: 'flex', gap: 12 }}>
+                            <button onClick={() => { setDeleteTarget(null); setDeleteStep(0); }} style={{ flex: 1, padding: '14px', background: '#fff', color: '#000', border: 'none', borderRadius: 8, fontWeight: 800, cursor: 'pointer', transition: 'all 0.2s' }} onMouseEnter={e => e.currentTarget.style.transform='scale(1.02)'} onMouseLeave={e => e.currentTarget.style.transform='scale(1)'}>No</button>
+                            <button onClick={confirmDelete} style={{ flex: 1, padding: '14px', background: '#EF4444', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 800, cursor: 'pointer', transition: 'all 0.2s' }} onMouseEnter={e => e.currentTarget.style.transform='scale(1.02)'} onMouseLeave={e => e.currentTarget.style.transform='scale(1)'}>Yes</button>
+                        </div>
                     </div>
                 </div>
             )}
@@ -411,11 +584,26 @@ export default function Dashboard() {
     );
 }
 
-function NavAction({ label, active, onClick, badge, color }: any) {
+function NavAction({ label, active, onClick, badge, color, onDelete, onEdit }: any) {
     return (
-        <div onClick={onClick} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderRadius: 12, cursor: 'pointer', background: active ? 'rgba(124, 58, 237, 0.1)' : 'transparent', color: active ? '#fff' : '#94A3B8', marginBottom: 2, transition: 'all 0.2s' }}>
-            <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>{label}</span>
-            <span style={{ fontSize: '0.7rem', color: color || '#7C3AED', fontWeight: 700 }}>{badge}</span>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderRadius: 12, cursor: 'pointer', background: active ? 'rgba(124, 58, 237, 0.1)' : 'transparent', color: active ? '#fff' : '#94A3B8', marginBottom: 2, transition: 'all 0.2s' }}>
+            <div style={{flex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center'}} onClick={onClick}>
+                <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>{label}</span>
+                {badge !== undefined && <span style={{ fontSize: '0.7rem', color: color || '#7C3AED', fontWeight: 700, marginRight: (onDelete || onEdit) ? 20 : 0 }}>{badge}</span>}
+            </div>
+            
+            <div style={{ position: 'absolute', top: 4, right: 6, display: 'flex', gap: 4 }}>
+                {onEdit && (
+                    <div onClick={(e) => { e.stopPropagation(); onEdit(); }} style={{ padding: '2px', color: 'rgba(59, 130, 246, 0.4)', fontSize: '0.65rem', fontWeight: 400, transition: 'color 0.2s' }} onMouseEnter={e => e.currentTarget.style.color = '#3B82F6'} onMouseLeave={e => e.currentTarget.style.color = 'rgba(59, 130, 246, 0.4)'}>
+                        ✎
+                    </div>
+                )}
+                {onDelete && (
+                    <div onClick={(e) => { e.stopPropagation(); onDelete(); }} style={{ padding: '4px', color: 'rgba(239, 68, 68, 0.2)', fontSize: '0.45rem', fontWeight: 300, transition: 'all 0.2s', border: '1px solid rgba(239, 68, 68, 0.1)', borderRadius: '4px', lineHeight: 1 }} onMouseEnter={e => { e.currentTarget.style.color = '#EF4444'; e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'; }} onMouseLeave={e => { e.currentTarget.style.color = 'rgba(239, 68, 68, 0.2)'; e.currentTarget.style.background = 'transparent'; }}>
+                        ✕
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
