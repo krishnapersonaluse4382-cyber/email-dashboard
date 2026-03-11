@@ -13,4 +13,6 @@ export type EmailLog = {
     scheduled_at: string | null;
     sent_at: string | null;
     started_at: string | null;
+    assigned_agent?: string;
+    dna_type?: string;
 };
