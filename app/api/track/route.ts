@@ -30,6 +30,13 @@ export async function GET(request: Request) {
                 const now = Date.now();
                 const diffSeconds = (now - sentTime) / 1000;
 
+                // 🛡️ SCAN GUARD: Ignore hits that happen within 5 seconds of sending
+                // These are almost always security bots (GoogleImageProxy) scanning the mail
+                if (diffSeconds < 5) {
+                    console.log(`[TRACK] 🛡️ Scan Guard: Ignoring hit for ID ${id} (Sent ${diffSeconds.toFixed(1)}s ago)`);
+                    return new NextResponse(PIXEL, { headers: { 'Content-Type': 'image/gif' } });
+                }
+
                 console.log(`[TRACK] ID: ${id} | Sent ${diffSeconds.toFixed(1)}s ago | Agent: ${userAgent.substring(0, 50)}`);
 
                 // Always record the open if it exists. 
