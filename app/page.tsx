@@ -648,13 +648,11 @@ export default function Dashboard() {
                     </div>
                 </header>
 
-                <section style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 20, marginBottom: 32 }}>
+                <section style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20, marginBottom: 32 }}>
                     <SummaryCard label="Sent Volume" value={totalSent} sub="Total emails" />
                     <SummaryCard label="Reach" value={openRate + '%'} sub={`${uniqueOpened} Opens`} color="#8B5CF6" />
                     <SummaryCard label="Engagement" value={clickRate + '%'} sub={`${uniqueClicked} Clicks`} color="#3B82F6" />
                     <SummaryCard label="Success" value={replyRate + '%'} sub={`${uniqueReplied} Replies`} color="#10B981" />
-                    <SummaryCard label="Interactions" value={visibleOpens.length + visibleClicks.length + visibleReplies.length} sub="Total events" />
-                    <SummaryCard label="Active Nodes" value={4} sub="Cluster healthy" color="#10B981" />
                 </section>
 
                 <section style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20, marginBottom: 32 }}>
@@ -691,7 +689,6 @@ export default function Dashboard() {
                                     <th style={{ padding: 16, textAlign: 'left' }}>Industry</th>
                                     <th style={{ padding: 16, textAlign: 'left' }}>Campaign</th>
                                     <th style={{ padding: 16, textAlign: 'left' }}>Agent</th>
-                                    <th style={{ padding: 16, textAlign: 'left' }}>Interactions</th>
                                     <th style={{ padding: 16, textAlign: 'right' }}>Sent At</th>
                                 </tr>
                             </thead>
@@ -715,7 +712,6 @@ export default function Dashboard() {
                                             </td>
                                             <td style={{ padding: 16 }}>{getCleanName(log.campaign_id)}</td>
                                             <td style={{ padding: 16 }}>{agent.name.split(' ')[0]}</td>
-                                            <td style={{ padding: 16, fontFamily: 'monospace', color: '#7C3AED' }}>{opens}👁️ {clicks}🖱️ {replies}💬</td>
                                             <td style={{ padding: 16, textAlign: 'right', color: '#94A3B8', fontSize: '0.75rem' }}>
                                                 {(() => {
                                                     const date = log.sent_at || log.started_at || log.scheduled_at;
